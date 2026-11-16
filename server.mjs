@@ -35,6 +35,11 @@ const canBootstrap = () => !publicMode && organizers().length === 0;
 const sessions = new Map();
 const status = ['К выполнению', 'В работе', 'На проверке', 'Выполнено'];
 const eventTypes = ['Старт', 'Публикация кейса', 'Обучение', 'Вебинар', 'Консультация', 'Промежуточный дедлайн', 'Сдача проекта', 'Финальная защита', 'Результаты'];
+const programmingEventTypes = ['Старт', 'Раунд', 'Разбор задач', 'Результаты'];
+const formats = [['hackathon','Хакатон'],['programming','Чемпионат по спортивному программированию']];
+const maxCaseFileBytes = 2*1024*1024;
+const maxEventFileBytes = 8*1024*1024;
+const caseFileExtensions = /\.(pdf|doc|docx|txt|md|zip|png|jpe?g|csv|xlsx|pptx|json|in|out)$/i;
 function emptyHackathon() {
   const start = Date.now();
   return {
@@ -139,6 +144,44 @@ const isParticipant = (user) => hasRole(user,'participant');
 const isAdvisor = user => hasRole(user,'mentor') || hasRole(user,'expert');
 const assigned = (team,user) => isAdvisor(user) && (team.mentor===user || team.expert===user);
 const canView = (team,user) => team && !team.archived && (canManage(user) || (admitted(user)&&team.members.includes(user)) || assigned(team,user));
+const programming = event => event.format==='programming';
+const formatName = event => formats.find(([id])=>id===event.format)?.[1] ?? formats[0][1];
+const casesName = event => programming(event)?'Задачи':'Кейсы';
+function eventCases(data) {
+  if(data.cases) return data.cases;
+  return data.event.caseText?[{id:'legacy',title:programming(data.event)?'Основная задача':'Основной кейс',
+    description:data.event.caseText,files:[]}]:[];
+}
+function caseChoice(data) {
+  const cases=eventCases(data);
+  if(programming(data.event) || cases.length<2) return '';
+  return select('Выберите кейс','caseId',[['','Выберите из списка'],...cases.map(item=>[item.id,item.title])],'');
+}
+function caseHeading(data,id) {
+  return eventCases(data).find(item=>item.id===id)?.title;
+}
+function caseFileLink(file) {
+  const href=e(scopedUrl('/case-file?id='+encodeURIComponent(file.id)));
+  return '<a href="'+href+'">'+e(file.name)+'</a> <small class="muted">· '+Math.max(1,Math.ceil(file.size/1024))+' КБ</small>';
+}
+function casesOpen(data) {
+  return !programming(data.event) || Date.now()>=data.event.start;
+}
+function eventProgram(data,team) {
+  const event=data.event;
+  const choice=caseHeading(data,team?.caseId);
+  let items='<p class="muted">Организатор ещё не добавил задания.</p>';
+  if(!casesOpen(data)) items='<p>Условия задач и файлы откроются '+dt(event.start)+'.</p>';
+  else if(eventCases(data).length) items=eventCases(data).map(item=>'<article class="case-entry"><h3>'+e(item.title)+
+    '</h3><p class="preserved-lines">'+e(item.description)+'</p>'+
+    (item.files?.length?'<ul>'+item.files.map(file=>'<li>'+caseFileLink(file)+'</li>').join('')+'</ul>':'')+'</article>').join('');
+  const tools=programming(event)?'<div class="form-actions">'+
+    (casesOpen(data)?link('Открыть систему проверки',event.judgeUrl):'')+link('Открыть таблицу результатов',event.standingsUrl)+'</div>':'';
+  return panel(casesName(event)+' и правила',(choice?'<p class="badge good">Кейс команды: '+e(choice)+'</p>':'')+
+    items+'<h3>Условия отбора</h3><p class="preserved-lines">'+e(event.selectionRules||event.rules||'Организатор не указал отдельные условия.')+'</p>'+
+    '<h3>Правила участия</h3><p class="preserved-lines">'+e(event.rules)+'</p><h3>'+
+    (programming(event)?'Правила зачёта':'Критерии оценки')+'</h3><p class="preserved-lines">'+e(event.criteria)+'</p>'+tools,'case');
+}
 
 const roleLabels = { organizer:'Организатор', mentor:'Ментор', expert:'Эксперт', participant:'Участник' };
 const brand = href => '<a class="brand" href="'+href+'"><span class="brand-mark" aria-hidden="true"></span>HackFlow</a>';
@@ -264,8 +307,9 @@ function checkpointUpdate(team,user,full) {
   return panel('Чекпоинт назначен',meeting(team.meeting)+'<p><a href="'+href+'">Открыть чекпоинт</a></p>');
 }
 function workspace(team,user,section = 'all') {
+  const event=currentEventData().event;
   const own = team.members.includes(user);
-  const canSubmit = team.captain === user && team.registered && !team.submission && Date.now() < currentEventData().event.deadline;
+  const canSubmit = !programming(event) && team.captain === user && team.registered && !team.submission && Date.now() < event.deadline;
   const registration = team.captain===user && !team.registered ? action('register','','Зарегистрировать команду') : '';
   const captain = team.captain === user;
   const roster = '<ul class="roster">'+team.members.map(id=>{
@@ -295,16 +339,22 @@ function workspace(team,user,section = 'all') {
   const feedback=panel('Диалог с ментором и экспертом',guidance+history+
     (canWrite?action('feedback',hidden('team',team.id)+area('Сообщение','body'),'Отправить сообщение'):''),'feedback');
   const reviews=panel('Экспертное заключение', '<p class="muted">Критерии: '+e(currentEventData().event.criteria)+'</p>'+(team.reviews?.length?messageList(team.reviews):'<p class="muted">После сдачи проекта назначенный эксперт оставит здесь отзыв.</p>')+(team.expert===user&&team.submission?action('review',hidden('team',team.id)+area('Итоговый отзыв по критериям','body'),'Опубликовать заключение'):''),'review');
-  const submission = panel('Сдача проекта',project(team.submission)+(Date.now()>=currentEventData().event.deadline&&!team.submission?'<p class="warning">Срок сдачи истёк.</p>':'')+send,'send');
-  const sections = { team: overview, checkpoint: checkpoint(team,user), board: taskBoard(team,user), chat, feedback, send: submission+reviews };
+  const submission = programming(event)
+    ? panel('Сдача решений',casesOpen(currentEventData())
+      ? '<p>Отправляйте решения и проверяйте вердикты во внешней системе.</p>'+(link('Открыть систему проверки',event.judgeUrl)||'<p class="muted">Ссылка на систему проверки ещё не опубликована.</p>')
+      : '<p>Ссылка будет доступна после старта '+dt(event.start)+'.</p>','send')
+    : panel('Сдача проекта',project(team.submission)+(Date.now()>=event.deadline&&!team.submission?'<p class="warning">Срок сдачи истёк.</p>':'')+send,'send')+reviews;
+  const sections = { team: overview, checkpoint: checkpoint(team,user), board: taskBoard(team,user), chat, feedback, send: submission };
   if (section === 'team') return overview+'<div class="team-work">'+sections.board+chat+'</div>'+feedback;
   return section === 'all' ? Object.values(sections).join('') : sections[section];
 }
 function schedule(team) {
+  const event=currentEventData().event;
+  const contest=programming(event);
   const automatic = [
-    { name: 'Старт хакатона', type: 'Старт', at: currentEventData().event.start },
-    { name: 'Публикация кейса', type: 'Публикация кейса', at: currentEventData().event.start },
-    { name: 'Итоговая сдача', type: 'Сдача проекта', at: currentEventData().event.deadline }
+    { name: contest?'Старт чемпионата':'Старт хакатона', type: 'Старт', at:event.start },
+    { name: contest?'Открытие задач':'Публикация кейсов', type: contest?'Раунд':'Публикация кейса', at:event.start },
+    { name: contest?'Окончание зачёта':'Итоговая сдача', type: contest?'Раунд':'Сдача проекта', at:event.deadline }
   ];
   const items = [...automatic,...currentEventData().agenda,...(team?.meeting?[{...team.meeting,name:'Чекпоинт команды',type:'Консультация'}]:[])].sort((a,b)=>a.at-b.at);
   return panel('Расписание','<ul class="messages">'+items.map(item=>'<li><strong>'+e(item.name)+'</strong><p>'+e(item.type)+' · '+dt(item.at)+'</p>'+(item.speaker?'<p>'+e(item.speaker)+'</p>':'')+(item.description?'<p>'+e(item.description)+'</p>':'')+link('Подключиться или открыть запись',item.link)+'</li>').join('')+'</ul>','schedule');
@@ -317,7 +367,9 @@ const notificationPage = section => ['board','chat','feedback'].includes(section
 function alerts(user,team) {
   const generated = [];
   const at = Date.now();
-  if (team?.registered && !team.submission && at<currentEventData().event.deadline && currentEventData().event.deadline-at<=2*3600_000) generated.push({ message: 'До сдачи меньше двух часов', href: '/#send', at });
+  if (team?.registered && !team.submission && at<currentEventData().event.deadline && currentEventData().event.deadline-at<=2*3600_000) {
+    generated.push({message:programming(currentEventData().event)?'До конца чемпионата меньше двух часов':'До сдачи меньше двух часов',href:'/#send',at});
+  }
   for (const item of currentEventData().agenda) if (item.type==='Вебинар' && item.at<=at && at-item.at<3600_000) generated.push({ message: 'Начался вебинар «'+item.name+'»', href: '/#schedule', at: item.at });
   const items = [...generated,...currentEventData().notifications.filter(item=>item.recipients.includes(user))].sort((a,b)=>b.at-a.at);
   const href = item => {
@@ -329,7 +381,7 @@ function alerts(user,team) {
 function organizerNavigation(page,user) {
   const pending=pendingApplications(currentEventData()).length;
   const sections=[
-    ['', 'Команды'],['event','Настройки хакатона'],['access','Заявки команд'+(pending?' · '+pending:'')],
+    ['', 'Команды'],['event','Настройки мероприятия'],['cases',casesName(currentEventData().event)],['access','Заявки команд'+(pending?' · '+pending:'')],
     ['schedule','Расписание'],['materials','Материалы'],['staff','Менторы и эксперты'],['analytics','Аналитика']
   ];
   const activePage=page==='content'?'schedule':page??'';
@@ -340,21 +392,51 @@ function organizerNavigation(page,user) {
     '<a href="'+(id?'/?edit='+id:'/')+'" '+(activePage===id?'aria-current="page"':'')+'>'+label+'</a>').join('')+'</nav>';
 }
 
+function organizerCases(data,query) {
+  const label=casesName(data.event);
+  const fields=(item={})=>text('Название','title',item.title)+area('Условие','description',item.description);
+  const list=eventCases(data).map(item=>{
+    const caseId=hidden('caseId',item.id);
+    const files=(item.files??[]).map(file=>'<li>'+caseFileLink(file)+' '+
+      action('remove-case-file',caseId+hidden('fileId',file.id),'Удалить','inline roster-action')+'</li>').join('');
+    const upload='<form method="post" action="/upload-case-file" enctype="multipart/form-data" class="stack">'+caseId+
+      '<label>Файл<input name="file" type="file" required></label>'+button('Прикрепить файл')+'</form>';
+    return '<details class="panel" '+(query.get('case')===item.id?'open':'')+'><summary><strong>'+e(item.title)+'</strong><span>'+(item.files?.length??0)+' файлов</span></summary>'+
+      action('save-case',caseId+fields(item),'Сохранить условие')+'<h3>Файлы</h3>'+
+      (files?'<ul class="messages">'+files+'</ul>':'<p class="muted">Файлов пока нет.</p>')+upload+'</details>';
+  }).join('');
+  return panel(label,'<p>Добавьте условия и файлы. Команды получают материалы после допуска'+
+    (programming(data.event)?' и старта чемпионата.':' В хакатоне с несколькими кейсами капитан выбирает один при подаче заявки.')+
+    '</p><p class="muted">До 2 МБ на файл и 8 МБ на мероприятие. Поддерживаются документы, изображения, ZIP и тестовые данные.</p>'+
+    '<details class="create-box" '+(!list?'open':'')+'><summary>'+(programming(data.event)?'Добавить задачу':'Добавить кейс')+
+    '</summary>'+action('save-case',fields(),'Добавить')+'</details>')+'<div class="case-list">'+list+'</div>';
+}
+
 function organizer(query) {
   const event = currentEventData().event;
   const training = text('Название материала','name')+area('Описание','description','',false)+text('Ссылка','link','','type="url" required maxlength="1000"');
-  const meetingFields = (item={}) => select('Тип','type',eventTypes.map(label=>[label,label]),item.type)+text('Название','name',item.name)+time('Дата и время','at',item.at)+area('Описание','description',item.description,false)+text('Спикер','speaker',item.speaker,'maxlength="120"')+text('Ссылка на эфир или запись','link',item.link,'type="url" maxlength="1000"');
+  const scheduleTypes=programming(event)?programmingEventTypes:eventTypes;
+  const meetingFields = (item={}) => select('Тип','type',[...new Set([...scheduleTypes,...(item.type?[item.type]:[])])].map(label=>[label,label]),item.type)+text('Название','name',item.name)+time('Дата и время','at',item.at)+area('Описание','description',item.description,false)+text('Спикер','speaker',item.speaker,'maxlength="120"')+text('Ссылка на эфир или запись','link',item.link,'type="url" maxlength="1000"');
   const page=query.get('edit');
+  if(page==='cases') return organizerCases(currentEventData(),query);
   const editEvent=page==='event' && (query.has('form') || !event.published);
   const fields=(title,body)=>'<fieldset class="setup-group"><legend>'+title+'</legend><div class="stack">'+body+'</div></fieldset>';
-  const basics=fields('Что увидят в каталоге',text('Название хакатона','title',event.title)+area('Короткое описание','description',event.description));
-  const rules=fields('Что увидят допущенные команды',area('Условия участия','rules',event.rules)+area('Задача кейса','caseText',event.caseText)+area('Критерии оценки','criteria',event.criteria));
+  const basics=fields('Что увидят в каталоге',select('Формат мероприятия','format',formats,event.format??'hackathon')+
+    text('Название мероприятия','title',event.title)+area('Короткое описание','description',event.description));
+  const rules=fields('Отбор и участие',area('Условия отбора · видны до заявки','selectionRules',event.selectionRules??event.rules)+
+    area('Правила участия','rules',event.rules)+area('Критерии оценки или правила зачёта','criteria',event.criteria)+
+    (event.caseText&&!currentEventData().cases?area('Текст основного кейса','caseText',event.caseText,false):'')+
+    '<p class="muted">Добавляйте отдельные задания и файлы на вкладке «'+casesName(event)+'».</p>');
+  const contest='<fieldset class="setup-group" data-programming-settings><legend>Для спортивного программирования</legend><div class="stack">'+
+    text('Ссылка на систему проверки решений','judgeUrl',event.judgeUrl,'type="url" maxlength="1000"')+
+    text('Ссылка на таблицу результатов','standingsUrl',event.standingsUrl,'type="url" maxlength="1000"')+
+    '<p class="muted">Условия задач откроются командам в момент старта. Решения проверяются во внешней системе.</p></div></fieldset>';
   const dates=fields('Сроки и размер команды','<div class="duo">'+time('Начало','start',event.start)+time('Дедлайн сдачи','deadline',event.deadline)+
     text('Минимум участников на команду','minTeamSize',event.minTeamSize??1,'type="number" min="1" max="9999" required')+
     text('Максимум участников на команду','teamSize',event.teamSize??'','type="number" min="1" max="9999" placeholder="Без ограничения"')+
     '</div><p class="muted">Минимум 1 разрешает индивидуальное участие.</p>');
   const manage=editEvent
-    ? panel(event.published?'Редактирование хакатона':'Создание хакатона','<p class="muted">Заполните карточку, сроки и кейс. После публикации хакатон появится в каталоге.</p><form method="post" action="/event" class="stack">'+basics+dates+rules+'<div class="form-actions"><button name="published" value="true">'+(event.published?'Сохранить изменения':'Опубликовать хакатон')+'</button>'+'<button class="secondary" name="published" value="false">'+(event.published?'Снять с публикации':'Сохранить черновик')+'</button>'+'</div></form>','manage')
+    ? panel(event.published?'Редактирование мероприятия':'Создание мероприятия','<p class="muted">Заполните карточку и сроки. Задания можно добавлять в черновик и после публикации.</p><form method="post" action="/event" class="stack">'+basics+dates+rules+contest+'<div class="form-actions"><button name="published" value="true">'+(event.published?'Сохранить изменения':'Опубликовать мероприятие')+'</button>'+'<button class="secondary" name="published" value="false">'+(event.published?'Снять с публикации':'Сохранить черновик')+'</button>'+'</div></form>','manage')
     : panel(e(event.title),'<span class="badge good">Опубликован</span><p>'+e(event.description)+'</p><p>Начало · '+dt(event.start)+'<br>Сдача до · '+dt(event.deadline)+'</p><div class="form-actions"><a class="button" href="/?edit=event&amp;form=1">Редактировать хакатон</a><a class="button secondary" href="/?edit=access">Настроить допуск</a></div>','manage');
   const agendaList=currentEventData().agenda.slice().sort((a,b)=>a.at-b.at).map(item=>
     '<details class="panel admin-row"><summary><strong>'+e(item.name)+'</strong><span>'+dt(item.at)+'</span></summary>'+
@@ -367,7 +449,7 @@ function organizer(query) {
   const reason = team => {
     if (team.checkpoint?.answer==='yes' && !team.meeting) return 'Запросили чекпоинт';
     if (team.meeting && !team.meeting.link && team.meeting.at>Date.now()) return 'Добавьте ссылку на чекпоинт';
-    if (team.submission) return '';
+    if (team.submission || programming(event)) return '';
     const left=event.deadline-Date.now();
     if (left<=0) return 'Дедлайн прошёл, проект не сдан';
     return left<=2*3600_000 ? 'До дедлайна меньше двух часов, проект не сдан' : '';
@@ -390,7 +472,9 @@ function organizer(query) {
       const [label,tone]=participationLabels[key];
       const controls=item.status==='pending'
         ? '<div class="form-actions">'+action('approve-team',fields,'Допустить команду','inline')+action('reject-team',fields,'Отклонить','inline roster-action')+'</div>' : '';
-      return '<li><strong>'+e(item.name)+'</strong> <span class="badge '+tone+'">'+label+'</span><p>Капитан: '+e(display(item.captain))+'</p><p>'+item.members.map(id=>e(display(id))).join(', ')+'</p>'+controls+'</li>';
+      const choice=caseHeading(data,item.caseId);
+      return '<li><strong>'+e(item.name)+'</strong> <span class="badge '+tone+'">'+label+'</span><p>Капитан: '+e(display(item.captain))+'</p><p>'+item.members.map(id=>e(display(id))).join(', ')+'</p>'+
+        (choice?'<p>Кейс: '+e(choice)+'</p>':'')+controls+'</li>';
     }).join('');
     const roster=withRole('participant').filter(item=>accessStatus(data,item.id) &&
       !['pending','approved'].includes(teamApplication(data,item.id)?.status)).map(item=>{
@@ -415,21 +499,27 @@ function organizer(query) {
     const submitted=registered.filter(team=>team.submission).length;
     const counts=[
       ['Допущено участников',eligible.length],['Активны за 24 часа',active],
-      ['Сформировано команд',formed.length],['Завершено задач',completed],['Отправлено решений',submitted]
+      ['Сформировано команд',formed.length],['Завершено задач на доске',completed]
     ];
     const stages=[
       ['Сформировали команду',formed.length],['Зарегистрировали состав',registered.length],
-      ['Начали работу',registered.filter(team=>team.tasks.length||team.messages.length||team.submission).length],
-      ['Сдали решение',submitted]
+      ['Начали работу в HackFlow',registered.filter(team=>team.tasks.length||team.messages.length||team.submission).length]
     ];
+    if(!programming(event)) {
+      counts.push(['Отправлено решений',submitted]);
+      stages.push(['Сдали решение',submitted]);
+    }
     const rows=stages.map(([label,count])=>'<li><strong>'+label+'</strong> · '+count+' из '+formed.length+'<br><progress max="'+Math.max(formed.length,1)+'" value="'+count+'" aria-label="'+label+'"></progress></li>').join('');
     return '<div class="metrics">'+counts.map(([label,count])=>'<div><strong>'+count+'</strong>'+label+'</div>').join('')+'</div>'+
-      panel('Прогресс команд','<ul class="messages">'+rows+'</ul><p class="muted">Активность учитывает вход и действия в хакатоне за последние сутки.</p>');
+      panel('Прогресс команд','<ul class="messages">'+rows+'</ul><p class="muted">Активность учитывает вход и действия в мероприятии за последние сутки.</p>'+
+        (programming(event)?link('Открыть таблицу результатов',event.standingsUrl):''));
   }
   const launch = !event.published ? '<a class="button" href="/?edit=event">Создать хакатон</a>' : pendingApplications(currentEventData()).length ? '<a class="button" href="/?edit=access">Проверить заявки команд</a>' : '<a class="button secondary" href="/?edit=schedule">Открыть расписание</a>';
   const attentionOnly=query.get('tab')==='attention';
   const filters='<nav class="team-filters" aria-label="Фильтр команд"><a href="/" '+(!attentionOnly?'aria-current="page"':'')+'>Все команды · '+formed.length+'</a><a href="/?tab=attention" '+(attentionOnly?'aria-current="page"':'')+'>Требуют внимания · '+attention.length+'</a></nav>';
-  return '<section class="organizer-overview panel"><div><span class="badge '+(event.published?'good':'warn')+'">'+(event.published?'Опубликован':'Черновик')+'</span><h2>'+e(event.title)+'</h2><p class="muted">Сдача до '+dt(event.deadline)+'</p></div>'+launch+'</section><div class="metrics"><div><strong>'+registered.length+'</strong>Зарегистрировано</div><div><strong>'+registered.filter(t=>t.submission).length+'</strong>Сдали проект</div><div><strong>'+attention.length+'</strong>Требуют внимания</div></div>'+
+  const middleMetric=programming(event)?'<strong>'+pendingApplications(currentEventData()).length+'</strong>Заявок на рассмотрении':
+    '<strong>'+registered.filter(t=>t.submission).length+'</strong>Сдали проект';
+  return '<section class="organizer-overview panel"><div><span class="badge '+(event.published?'good':'warn')+'">'+(event.published?'Опубликован':'Черновик')+'</span><h2>'+e(event.title)+'</h2><p class="muted">Сдача до '+dt(event.deadline)+'</p></div>'+launch+'</section><div class="metrics"><div><strong>'+registered.length+'</strong>Зарегистрировано</div><div>'+middleMetric+'</div><div><strong>'+attention.length+'</strong>Требуют внимания</div></div>'+
     filters+'<div class="stack">'+(selected.length ? selected.map(team=>{
       const r = reason(team);
       const t = team.checkpoint;
@@ -439,7 +529,7 @@ function organizer(query) {
         : '';
       const reply = team.meeting?'Встреча назначена':t?.answer==='no'?'Отказались':t?.answer==='yes'?'Запросили':'Ждём ответа';
       return '<details class="panel" id="team-'+e(team.id)+'" '+(focused?'open':'')+'><summary><strong>'+e(team.name)+'</strong><span class="'+(r?'warn':team.submission?'good':'muted')+'">'+e(r||(team.submission?'Сдано':team.registered?'В работе':'Состав не зарегистрирован'))+'</span></summary><div class="detail">'+(focused && query.get('saved')==='1'?'<p class="badge good" role="status">Чекпоинт сохранён. Команда получила уведомление.</p>':'')+'<p>Капитан · '+e(display(team.captain))+'</p><div class="admin-roster"><strong>Состав</strong>'+team.members.map(id=>'<span class="admin-member">'+e(display(id))+(account(id)&&!admitted(id)?' (без допуска)':'')+
-        ''+'</span>').join('')+'</div>'+project(team.submission)+'<p><a href="/?team='+e(team.id)+'">Открыть доску и отзывы</a></p>'+action('mentor',hidden('team',team.id)+select('Ментор','mentor',[['','Без ментора'],...withRole('mentor').map(item=>[item.id,item.name])],team.mentor??'')+select('Эксперт','expert',[['','Без эксперта'],...withRole('expert').map(item=>[item.id,item.name])],team.expert??''),'Сохранить назначения')+(currentEventData().poll?'<p>Чекпоинт · '+reply+'</p>':'')+meet+'</div></details>';
+        ''+'</span>').join('')+'</div>'+(programming(event)?link('Таблица результатов',event.standingsUrl):project(team.submission))+'<p><a href="/?team='+e(team.id)+'">Открыть доску и отзывы</a></p>'+action('mentor',hidden('team',team.id)+select('Ментор','mentor',[['','Без ментора'],...withRole('mentor').map(item=>[item.id,item.name])],team.mentor??'')+select('Эксперт','expert',[['','Без эксперта'],...withRole('expert').map(item=>[item.id,item.name])],team.expert??''),'Сохранить назначения')+(currentEventData().poll?'<p>Чекпоинт · '+reply+'</p>':'')+meet+'</div></details>';
     }).join(''):'<p class="panel">'+(attentionOnly?'Сейчас ни одной команде не требуется внимание.':'Здесь появятся команды после регистрации состава капитаном.')+'</p>')+'</div>'+panel('Опрос по чекпоинтам',poll);
 }
 function hackathonCatalog(user,error='',mine=false) {
@@ -461,7 +551,7 @@ function hackathonCatalog(user,error='',mine=false) {
       key==='open'?'Зарегистрироваться на хакатон':'Подробнее';
     const open = '<a class="button secondary" href="'+route+'">'+cta+'</a>';
     return panel(e(event.title||'Новый хакатон'),'<span class="badge '+tone+'">'+label+'</span>'+
-      '<p>'+e(event.description||'Добавьте описание, кейс и сроки перед публикацией.')+'</p>'+
+      '<p><small class="muted">'+formatName(event)+'</small></p><p>'+e(event.description||'Добавьте описание и сроки перед публикацией.')+'</p>'+
       (event.title?'<p class="muted">Сдача до '+dt(event.deadline)+'</p>':'')+'<div class="form-actions">'+open+'</div>');
   });
   const create = organizer?action('new-hackathon','','Создать хакатон'):'';
@@ -509,7 +599,7 @@ function applicationPage(user,data,error) {
     next='<p>Приём заявок завершён.</p>';
   } else if(!team) {
     next=(event.minTeamSize??1)===1
-      ? '<p>Можно участвовать одному или с командой.</p><div class="form-actions">'+action('apply-team',hidden('mode','solo'),'Зарегистрироваться одному','inline')+'<a class="button secondary" href="/my-team">Собрать команду</a></div>'
+      ? '<p>Можно участвовать одному или с командой.</p>'+action('apply-team',hidden('mode','solo')+caseChoice(data),'Зарегистрироваться одному')+'<p><a class="button secondary" href="/my-team">Собрать команду</a></p>'
       : '<p>Для этого хакатона нужна команда. Создайте её или вступите по коду. Заявку за состав отправляет капитан.</p><a class="button" href="/my-team">Создать команду или вступить</a>';
   } else if(data.teams.some(item=>!item.archived && item.registered &&
     (item.sourceTeam===team.id || item.members.includes(team.captain)))) {
@@ -520,13 +610,19 @@ function applicationPage(user,data,error) {
     const sizeError=teamSizeError(event,team.members.length);
     next='<p>Команда «'+e(team.name)+'»</p><ul>'+team.members.map(id=>'<li>'+e(display(id))+'</li>').join('')+'</ul>'+
       (sizeError?'<p class="warning">'+sizeError+'</p>':
-        action('apply-team','','Зарегистрировать команду'));
+        action('apply-team',caseChoice(data),'Зарегистрировать команду'));
   }
   const [label,tone]=participationLabels[participationStatus(data,user)];
   const status='<span class="badge '+tone+'">'+label+'</span>';
-  return layout(user,event.title,panel('Участие команды',
-    '<p>'+e(event.description)+'</p><p class="muted">Сдача проекта до '+dt(event.deadline)+
-    ' · Размер команды: от '+(event.minTeamSize??1)+(event.teamSize?' до '+event.teamSize:'')+'</p>'+status+next),error);
+  const caseTitles=programming(event)?'':eventCases(data).map(item=>'<li>'+e(item.title)+'</li>').join('');
+  const conditions=panel('Условия отбора','<p class="muted">'+formatName(event)+' · '+dt(event.start)+' — '+dt(event.deadline)+'</p>'+
+    '<p>'+e(event.description)+'</p><p class="preserved-lines">'+e(event.selectionRules||event.rules||'Организатор не указал отдельные условия.')+'</p>'+
+    (caseTitles?'<h3>Кейсы на выбор</h3><ul>'+caseTitles+'</ul>':'')+
+    (programming(event)?'<h3>Правила зачёта</h3><p class="preserved-lines">'+e(event.criteria)+'</p>':''));
+  const choice=caseHeading(data,application?.caseId);
+  return layout(user,event.title,conditions+panel('Заявка на участие',
+    '<p class="muted">Размер состава: от '+(event.minTeamSize??1)+(event.teamSize?' до '+event.teamSize:'')+
+    '</p>'+status+(choice?'<p>Кейс: '+e(choice)+'</p>':'')+next),error);
 }
 
 function screen(user, query, error) {
@@ -545,7 +641,7 @@ function screen(user, query, error) {
   if(hasRole(user,'organizer')) {
     if(!canManage(user)) return hackathonCatalog(user,error);
     const edit=query.get('edit');
-    const titles={staff:'Менторы и эксперты',event:'Настройки хакатона',access:'Заявки команд',schedule:'Расписание хакатона',content:'Расписание хакатона',materials:'Материалы хакатона',analytics:'Аналитика хакатона'};
+    const titles={staff:'Менторы и эксперты',event:'Настройки мероприятия',cases:casesName(currentEventData().event),access:'Заявки команд',schedule:'Расписание',content:'Расписание',materials:'Материалы',analytics:'Аналитика'};
     return layout(user,Object.hasOwn(titles,edit)?titles[edit]:'Команды хакатона',organizer(query),error,organizerNavigation(edit,user));
   }
   if(isAdvisor(user)) {
@@ -564,11 +660,12 @@ function screen(user, query, error) {
     : !team.registered ? [isCaptain?'Зарегистрируйте команду':'Капитан регистрирует команду','team','Открыть состав']
     : currentEventData().poll && isCaptain && !team.checkpoint ? ['Ответьте на приглашение к чекпоинту','checkpoint','Ответить']
     : team.submission ? ['Проект сдан','send','Посмотреть сдачу']
+    : programming(event)?['Задачи чемпионата','program','Открыть программу']
     : isCaptain && open && event.deadline-Date.now()<=2*3600_000 ? ['Пора сдавать проект','send','Перейти к сдаче']
     : ['Продолжите работу над проектом','team','Открыть команду'];
   const tabs=[['home','Обзор'],['program','Программа'],['team','Команда']];
   if(team) tabs.push(['checkpoint','Чекпоинт']);
-  if(team?.registered) tabs.push(['send','Сдача']);
+  if(team?.registered) tabs.push(['send',programming(event)?'Сдача решений':'Сдача']);
   const aliases={case:'program',schedule:'program',resources:'program',board:'team',chat:'team',feedback:'team'};
   const requested=query.get('section');
   const section=Object.hasOwn(aliases,requested)?aliases[requested]:requested;
@@ -578,12 +675,12 @@ function screen(user, query, error) {
   const join=!open?panel('Регистрация закрыта','<p>Срок вступления в команду истёк.</p>','team'):panel('Нет команды?', '<p>Создайте свою команду или введите код, который прислал капитан.</p><div class="duo">'+action('create-team',text('Название команды','name'),'Создать команду')+action('join',text('Код приглашения','code','','required maxlength="10"'),'Вступить по коду')+'</div>','team');
   const pages={
     home:()=>'<p class="intro">Здравствуйте, '+e(display(user).split(' ')[0])+'. '+(team?'Продолжим работу с командой «'+e(team.name)+'».':'Вы допущены к хакатону. Начните со знакомства с кейсом и выбора команды.')+'</p>'+overview+'<div class="dashboard-grid">'+panel('Моя команда',team?'<span class="badge good">'+(team.submission?'Проект сдан':team.registered?'Состав зарегистрирован':'Собираем состав')+'</span><h3>'+e(team.name)+'</h3><p class="muted">'+team.members.length+' участников · '+(isCaptain?'Вы капитан':'Капитан — '+e(display(team.captain)))+'</p><a href="'+eventPage('team')+'">Перейти к команде →</a>':'<p class="muted">Создайте команду и пригласите участников или введите код капитана.</p><a href="'+eventPage('team')+'">Найти своё место в команде →</a>')+panel('Мои задачи',team?'<strong class="dashboard-number">'+team.tasks.filter(t=>t.owner===user&&t.status!==3).length+'</strong><p class="muted">Незавершённых задач назначено вам</p><a href="'+eventPage('team')+'#board">Открыть доску →</a>':'<p class="muted">После вступления в команду здесь появятся назначенные вам задачи.</p>')+panel('Кейс и материалы','<p class="muted">Изучите задачу, критерии оценки и правила перед началом работы.</p><a href="'+eventPage('program')+'">Открыть программу →</a>')+'</div>',
-    case:()=>panel('Кейс и правила','<p>'+e(event.caseText)+'</p><h3>Условия участия</h3><p>'+e(event.rules)+'</p><h3>Критерии оценки</h3><p>'+e(event.criteria)+'</p>','case'),
+    case:()=>eventProgram(currentEventData(),team),
     schedule:()=>schedule(team),
     resources,
     notifications:()=>alerts(user,team)
   };
-  pages.program=()=>'<div class="program-links"><a href="#case">Кейс и правила</a><a href="#schedule">Расписание</a><a href="#resources">Материалы</a></div>'+pages.case()+pages.schedule()+pages.resources();
+  pages.program=()=>'<div class="program-links"><a href="#case">'+casesName(event)+' и правила</a><a href="#schedule">Расписание</a><a href="#resources">Материалы</a></div>'+pages.case()+pages.schedule()+pages.resources();
   const fullCheckpoint=active==='checkpoint';
   const liveUrl=scopedUrl('/checkpoint-update'+(fullCheckpoint?'?full=1':''));
   const live=team?.registered
@@ -599,19 +696,26 @@ class RequestError extends Error {
 }
 const fail = (message,code) => { throw new RequestError(message,code); };
 function check(condition,message='Действие недоступно.',code=403) { if(!condition) fail(message,code); }
-async function readForm(req) {
+async function readForm(req,multipart=false) {
   const buffers=[];
   let size=0;
   for await (const chunk of req) {
     const buffer=Buffer.from(chunk);
     size+=buffer.length;
-    if(size>45000) fail('Форма слишком большая.',413);
+    if(size>(multipart?maxCaseFileBytes+32768:45000)) fail(multipart?'Файл слишком большой. Максимум 2 МБ.':'Форма слишком большая.',413);
     buffers.push(buffer);
   }
-  return new URLSearchParams(Buffer.concat(buffers).toString('utf8'));
+  const body=Buffer.concat(buffers);
+  if(!multipart) return new URLSearchParams(body.toString('utf8'));
+  const type=req.headers['content-type']??'';
+  check(/^multipart\/form-data\s*;/i.test(type),'Загрузите файл через форму.',400);
+  try { return await new Response(body,{headers:{'Content-Type':type}}).formData(); }
+  catch { fail('Не удалось прочитать файл.',400); }
 }
 function field(form,name,max=120,required=true) {
-  const value=form.get(name)?.trim()??'';
+  const raw=form.get(name);
+  check(raw===null || typeof raw==='string','Проверьте формат поля.',400);
+  const value=raw?.trim()??'';
   check(value.length<=max && (!required||value.length>0),'Проверьте заполнение полей.',400);
   return value;
 }
@@ -621,8 +725,8 @@ function date(form,name) {
   check(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) && Number.isFinite(at) && inputTime(at)===value,'Укажите корректную дату и время.',400);
   return at;
 }
-function external(form,required=true) {
-  const value=field(form,'link',1000,required);
+function external(form,required=true,name='link') {
+  const value=field(form,name,1000,required);
   if(!value) return '';
   const url=URL.parse(value);
   check(url && ['http:','https:'].includes(url.protocol) && !url.username && !url.password,'Укажите действующую ссылку HTTP или HTTPS.',400);
@@ -688,7 +792,7 @@ function teamSizeError(event,size) {
   if(event.teamSize && size>event.teamSize) return 'Состав превышает лимит этого хакатона.';
   return '';
 }
-function applyAsTeam(data,user,solo) {
+function applyAsTeam(data,user,solo,caseId='') {
   check(data.event.published && Date.now()<data.event.deadline,'Приём заявок закрыт.',409);
   let team=platformTeam(user);
   if(solo) {
@@ -704,10 +808,56 @@ function applyAsTeam(data,user,solo) {
     'Команда или участник уже зарегистрированы на этот хакатон.',409);
   check(team.members.every(id=>!['requested','revoked'].includes(accessStatus(currentEventData(),id))),
     'У участника есть прежняя заявка или отозван допуск. Обратитесь к организатору.',409);
+  const cases=eventCases(data);
+  let selectedCase;
+  if(!programming(data.event) && cases.length) {
+    selectedCase=cases.length===1 && !caseId?cases[0]:cases.find(item=>item.id===caseId);
+    check(selectedCase,'Выберите кейс для заявки.',400);
+  }
   data.applications??=[];
-  data.applications.push({id:randomUUID(),sourceTeam:team.id,name:team.name,captain:user,members:[...team.members],status:'pending',at:Date.now()});
+  data.applications.push({id:randomUUID(),sourceTeam:team.id,name:team.name,captain:user,members:[...team.members],caseId:selectedCase?.id,status:'pending',at:Date.now()});
 }
-function organizerAction(data,path,form) {
+
+async function parseCaseUpload(form) {
+  const file=form.get('file');
+  check(file instanceof File && file.size>0,'Выберите файл.',400);
+  check(file.size<=maxCaseFileBytes,'Файл слишком большой. Максимум 2 МБ.',413);
+  const name=file.name.replace(/[\u0000-\u001f\u007f\/\\]/g,'_').slice(0,160);
+  check(caseFileExtensions.test(name),'Этот формат файла не поддерживается.',400);
+  return {id:randomUUID(),name,size:file.size,content:Buffer.from(await file.arrayBuffer()).toString('base64')};
+}
+
+function changeCase(data,path,form,upload) {
+  const id=field(form,'caseId',120,false);
+  const cases=data.cases??=eventCases(data);
+  let item=cases.find(entry=>entry.id===id);
+  if(path==='save-case' && !id) {
+    check(cases.length<30,'Достигнут лимит в 30 заданий.',409);
+    item={id:randomUUID(),files:[]};
+    cases.push(item);
+  }
+  check(item,'Кейс или задача не найдены.',404);
+  if(path==='save-case') {
+    item.title=field(form,'title');
+    item.description=field(form,'description',3000);
+  }
+  if(path==='upload-case-file') {
+    const total=cases.reduce((sum,entry)=>sum+(entry.files??[]).reduce((subtotal,file)=>subtotal+file.size,0),0);
+    check(total+upload.size<=maxEventFileBytes,'Достигнут лимит файлов мероприятия: 8 МБ.',409);
+    item.files??=[];
+    check(item.files.length<20,'К одному заданию можно прикрепить до 20 файлов.',409);
+    item.files.push(upload);
+  }
+  if(path==='remove-case-file') {
+    const fileId=field(form,'fileId');
+    check(item.files?.some(file=>file.id===fileId),'Файл не найден.',404);
+    item.files=item.files.filter(file=>file.id!==fileId);
+  }
+  return '/?edit=cases&case='+item.id;
+}
+const caseActions=new Set(['save-case','upload-case-file','remove-case-file']);
+function organizerAction(data,path,form,upload) {
+  if(caseActions.has(path)) return changeCase(data,path,form,upload);
   const team=data.teams.find(item=>item.id===form.get('team') && !item.archived);
   switch(path) {
     case 'approve-team':
@@ -726,7 +876,7 @@ function organizerAction(data,path,form) {
       item.status='approved';
       data.access??={};
       for(const id of item.members) data.access[id]='admitted';
-      data.teams.push({id:randomUUID(),sourceTeam:item.sourceTeam,name:item.name,captain:item.captain,members:[...item.members],
+      data.teams.push({id:randomUUID(),sourceTeam:item.sourceTeam,name:item.name,captain:item.captain,members:[...item.members],caseId:item.caseId,
         registered:true,tasks:[],messages:[],feedback:[]});
       notice(data,item.members,'Ваша команда допущена к хакатону','/#team');
       return '/?edit=access';
@@ -758,6 +908,11 @@ function organizerAction(data,path,form) {
       return '/?edit=access';
     }
     case 'event': {
+      const format=field(form,'format',30,false)||data.event.format||'hackathon';
+      check(formats.some(([id])=>id===format),'Выберите формат мероприятия.',400);
+      check(format===(data.event.format??'hackathon') ||
+        (!data.teams.some(item=>!item.archived) && !pendingApplications(data).length),
+        'Сменить формат можно до формирования команд и подачи заявок.',409);
       const start=date(form,'start'), deadline=date(form,'deadline');
       check(deadline>start,'Дедлайн должен быть позже старта.',400);
       const rawLimit=field(form,'teamSize',4,false);
@@ -769,13 +924,19 @@ function organizerAction(data,path,form) {
       check(teamSize===null || minTeamSize<=teamSize,'Минимальный размер команды не может превышать максимальный.',400);
       check(teamSize===null || !data.teams.some(team=>!team.archived && team.members.length>teamSize),'В одной из команд уже больше участников. Укажите лимит не меньше текущего состава.',409);
       data.owner ??= ownerOf(currentEventData());
-      data.event={minTeamSize,teamSize,title:field(form,'title'),description:field(form,'description',3000),rules:field(form,'rules',3000),caseText:field(form,'caseText',3000),criteria:field(form,'criteria',3000),start,deadline,published:form.get('published')==='true'};
+      data.event={format,minTeamSize,teamSize,title:field(form,'title'),description:field(form,'description',3000),
+        selectionRules:form.has('selectionRules')?field(form,'selectionRules',3000):data.event.selectionRules,
+        rules:field(form,'rules',3000),caseText:form.has('caseText')?field(form,'caseText',3000,false):data.event.caseText,
+        criteria:field(form,'criteria',3000),start,deadline,published:form.get('published')==='true',
+        judgeUrl:format==='programming'?external(form,false,'judgeUrl'):'',
+        standingsUrl:format==='programming'?external(form,false,'standingsUrl'):''};
       if(start!==currentEventData().event.start || deadline!==currentEventData().event.deadline) notice(data,participants(),'Изменились сроки хакатона','/#schedule');
       return form.get('published')==='true'?'/?edit=event':'/?edit=event#manage';
     }
     case 'agenda': {
       const type=field(form,'type');
-      check(eventTypes.includes(type),'Выберите тип события.',400);
+      const allowedTypes=programming(data.event)?programmingEventTypes:eventTypes;
+      check(allowedTypes.includes(type) || data.agenda.some(item=>item.id===form.get('id') && item.type===type),'Выберите тип события.',400);
       const id=form.get('id');
       const item={id:id||randomUUID(),type,name:field(form,'name'),at:date(form,'at'),description:field(form,'description',3000,false),speaker:field(form,'speaker',120,false),link:external(form,false)};
       if(id) {
@@ -953,6 +1114,7 @@ function participantAction(data,user,path,form) {
       return eventPage('team')+'#chat';
     }
     case 'submit': {
+      check(!programming(data.event),'Решения чемпионата отправляются через систему проверки.',409);
       check(team.captain===user,'Итоговое решение отправляет капитан.');
       const at=Date.now();
       check(at<data.event.deadline,'Срок сдачи истёк.',409);
@@ -1019,6 +1181,7 @@ async function handleRequest(req,res,url) {
       }
       if(['invite-staff','revoke-invite'].includes(route)) url.searchParams.set('edit','staff');
       if(['admit','revoke','approve-team','reject-team'].includes(route)) url.searchParams.set('edit','access');
+      if(caseActions.has(route)) url.searchParams.set('edit','cases');
       if(['agenda','remove-agenda','resource'].includes(route)) {
         url.searchParams.set('edit',route==='resource'?'materials':'schedule');
         url.searchParams.set('add','1');
@@ -1037,6 +1200,18 @@ async function handleRequest(req,res,url) {
   const redirect=location=>res.writeHead(303,{Location:location}).end();
   if(req.method==='GET' && url.pathname==='/board.js') return res.writeHead(200,{'Content-Type':'text/javascript; charset=utf-8'}).end(boardScript);
   if(req.method==='GET' && url.pathname==='/style.css') return res.writeHead(200,{'Content-Type':'text/css; charset=utf-8'}).end(css);
+  if(req.method==='GET' && url.pathname==='/case-file') {
+    const data=currentEventData();
+    const member=admitted(user) && memberTeam(data,user);
+    const permitted=canManage(user) || (data.event.published &&
+      ((member && casesOpen(data)) || data.teams.some(team=>!team.archived && assigned(team,user))));
+    if(!permitted) return page(403,'Файлы доступны допущенным участникам и назначенным специалистам.');
+    const file=eventCases(data).flatMap(item=>item.files??[]).find(item=>item.id===url.searchParams.get('id'));
+    if(!file) return page(404,'Файл не найден.');
+    const filename=encodeURIComponent(file.name.toWellFormed()).replace(/[!'()*]/g,c=>'%'+c.charCodeAt(0).toString(16));
+    return res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Length':file.size,
+      'Content-Disposition':"attachment; filename*=UTF-8''"+filename}).end(Buffer.from(file.content,'base64'));
+  }
   if(req.method==='GET' && url.pathname==='/checkpoint-update') {
     const data=currentEventData();
     const team=memberTeam(data,user);
@@ -1080,8 +1255,10 @@ async function handleRequest(req,res,url) {
   if(req.method!=='POST') return res.writeHead(405).end();
   try {
     check(req.headers['sec-fetch-site']!=='cross-site');
-    const form=await readForm(req);
     const path=url.pathname.slice(1);
+    if(path==='upload-case-file') check(canManage(user),'Прикреплять файлы может организатор мероприятия.');
+    const form=await readForm(req,path==='upload-case-file');
+    if(caseActions.has(path) && typeof form.get('caseId')==='string') url.searchParams.set('case',form.get('caseId'));
     if(path==='meeting' && form.get('team')) url.searchParams.set('meeting',form.get('team'));
     const reviewLogin=path==='review' && reviewEnabled();
     const quickLogin=reviewLogin || (demoMode && path==='demo-login');
@@ -1161,7 +1338,7 @@ async function handleRequest(req,res,url) {
     if(path==='apply-team' || path==='withdraw-team') {
       check(isParticipant(user));
       const next=structuredClone(currentEventData());
-      if(path==='apply-team') applyAsTeam(next,user,form.get('mode')==='solo');
+      if(path==='apply-team') applyAsTeam(next,user,form.get('mode')==='solo',field(form,'caseId',120,false));
       else {
         const application=pendingApplications(next).find(item=>item.id===form.get('application'));
         check(application?.captain===user,'Отозвать заявку может капитан, который её подал.');
@@ -1171,8 +1348,9 @@ async function handleRequest(req,res,url) {
       return redirect(scopedUrl('/'));
     }
     if(hasRole(user,'organizer')) check(canManage(user),'Доступ к этому хакатону закрыт.');
+    const upload=path==='upload-case-file'?await parseCaseUpload(form):undefined;
     const next=structuredClone(currentEventData());
-    const location=hasRole(user,'organizer') ? organizerAction(next,path,form) : isAdvisor(user) ? mentorAction(next,user,path,form) : participantAction(next,user,path,form);
+    const location=hasRole(user,'organizer') ? organizerAction(next,path,form,upload) : isAdvisor(user) ? mentorAction(next,user,path,form) : participantAction(next,user,path,form);
     if(isParticipant(user)) {
       next.activity??={};
       next.activity[user]=Date.now();
