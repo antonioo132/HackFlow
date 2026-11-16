@@ -1,0 +1,12 @@
+{
+  "name": "hackflow",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": {
+    "start": "node server.mjs --live",
+    "demo": "node server.mjs --demo",
+    "check": "node --check server.mjs && node --check board.js"
+  }
+}

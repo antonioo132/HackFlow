@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: hackflow
+    runtime: node
+    plan: starter
+    buildCommand: npm run check
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: HACKFLOW_MODE
+        value: review
+      - key: HACKFLOW_DATA_DIR
+        value: /var/data
+      - key: HACKFLOW_REVIEW_KEY
+        generateValue: true
+      - key: HACKFLOW_ORGANIZER_CODE
+        generateValue: true
+    disk:
+      name: hackflow-data
+      mountPath: /var/data
+      sizeGB: 1
