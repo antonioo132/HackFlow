@@ -380,3 +380,8 @@ h1, .hero h2, .auth-story h2 {
 @media (max-width: 850px) {
   .sidebar .hackathon-picker { grid-column: 1 / -1; grid-template-columns: minmax(0,1fr) auto; align-items: end; }
 }
+
+.preserved-lines { white-space: pre-wrap; }
+.case-list { display: grid; gap: 14px; margin-top: 16px; }
+.case-entry + .case-entry { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.case-entry:last-of-type { margin-bottom: 24px; }

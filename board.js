@@ -170,3 +170,11 @@ if(checkpointPanel) {
   setInterval(refreshCheckpoint,8000);
   document.addEventListener('visibilitychange',refreshCheckpoint);
 }
+
+const eventFormat = document.querySelector('select[name="format"]');
+const programmingSettings = eventFormat?.form?.querySelector('[data-programming-settings]');
+if (programmingSettings) {
+  const updateFormat=()=>{ programmingSettings.hidden=eventFormat.value!=='programming'; };
+  eventFormat.addEventListener('change',updateFormat);
+  updateFormat();
+}
