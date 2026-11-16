@@ -3,7 +3,7 @@ WORKDIR /app
 COPY --chown=node:node server.mjs style.css board.js ./
 RUN mkdir /app/data && chown node:node /app/data
 USER node
-ENV HOST=0.0.0.0 PORT=3030 HACKFLOW_MODE=review
+ENV HOST=0.0.0.0 PORT=3030 HACKFLOW_MODE=review HACKFLOW_PUBLIC_DEMO=1
 EXPOSE 3030
 CMD ["node", "server.mjs"]
 

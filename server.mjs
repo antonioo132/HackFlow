@@ -9,11 +9,13 @@ const publicMode = process.env.HACKFLOW_MODE === 'review' || !['127.0.0.1','loca
 const calledDirectly = Boolean(process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]);
 const demoMode = process.argv[2] === '--demo' || (calledDirectly && !publicMode && !process.argv[2]);
 if (demoMode && publicMode) throw new Error('Деморежим доступен только на localhost.');
+const publicDemo = publicMode && process.env.HACKFLOW_PUBLIC_DEMO === '1';
+const memoryOnly = demoMode || publicDemo;
 const demoAccounts = new Map();
 const storage = process.env.HACKFLOW_DATA_DIR
   ? resolve(process.env.HACKFLOW_DATA_DIR)
   : fileURLToPath(new URL('./data/', import.meta.url));
-if (!demoMode) mkdirSync(storage, { recursive: true });
+if (!memoryOnly) mkdirSync(storage, { recursive: true });
 const db = join(storage,'mvp.json');
 const css = readFileSync(new URL('./style.css', import.meta.url));
 const boardScript = readFileSync(new URL('./board.js', import.meta.url));
@@ -27,8 +29,8 @@ const users = {
 const passwordMin = publicMode ? 12 : 4;
 const organizerCode = process.env.HACKFLOW_ORGANIZER_CODE;
 const reviewKey = process.env.HACKFLOW_REVIEW_KEY;
-const hostedReview = publicMode && (reviewKey?.length ?? 0)>=16;
-const reviewEnabled = () => hostedReview && demoAccounts.size>0;
+const hostedReview = publicMode && !publicDemo && (reviewKey?.length ?? 0)>=16;
+const reviewEnabled = () => (publicDemo || hostedReview) && demoAccounts.size>0;
 const canBootstrap = () => !publicMode && organizers().length === 0;
 const sessions = new Map();
 const status = ['К выполнению', 'В работе', 'На проверке', 'Выполнено'];
@@ -45,13 +47,13 @@ function seed() {
 }
 let state;
 function persist(next) {
-  if (!demoMode) {
+  if (!memoryOnly) {
     writeFileSync(db + '.tmp', JSON.stringify(next));
     renameSync(db + '.tmp', db);
   }
   state = next;
 }
-if (demoMode) state=seed();
+if (memoryOnly) state=seed();
 else {
   try { state = JSON.parse(readFileSync(db, 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; persist(seed()); }
@@ -181,10 +183,10 @@ function signIn(error, register = false, email = '', name = '', role = 'particip
 function reviewPage(error='') {
   const roles=[...demoAccounts].map(([label,id])=>[id,label]);
   const fields=select('Роль','account',roles)+
-    text('Код для жюри','reviewKey','','type="password" required maxlength="160" autocomplete="off"');
+    (publicDemo?'':text('Код для жюри','reviewKey','','type="password" required maxlength="160" autocomplete="off"'));
   return layout(null,'Демо для жюри',panel('Выберите роль',
     '<p>Тестовые роли работают с общими демонстрационными данными.</p>'+
-    action('review',fields,'Войти в демо')+'<p><a href="/?login">Обычный вход</a></p>'),error);
+    action('review',fields,'Войти в демо')+(publicDemo?'':'<p><a href="/?login">Обычный вход</a></p>')),error);
 }
 function matchesCode(expected,provided) {
   const a=Buffer.from(expected??'');
@@ -529,6 +531,7 @@ function applicationPage(user,data,error) {
 
 function screen(user, query, error) {
   if (!user) {
+    if(publicDemo) return reviewPage(error);
     if(query.has('login')) return signIn(error,false,'','','participant',true);
     if(demoMode && !query.has('signup')) return signIn(error);
     if (error || query.has('login') || query.has('signup') || query.has('team')) return signIn(error,query.has('signup'));
@@ -1082,6 +1085,7 @@ async function handleRequest(req,res,url) {
     if(path==='meeting' && form.get('team')) url.searchParams.set('meeting',form.get('team'));
     const reviewLogin=path==='review' && reviewEnabled();
     const quickLogin=reviewLogin || (demoMode && path==='demo-login');
+    if(publicDemo && (path==='login' || path==='sign-up')) return redirect('/review');
     if(path==='login' || path==='sign-up' || quickLogin) {
       const signingUp=path==='sign-up';
       const email=(form.get('email')??'').trim().toLowerCase().slice(0,255);
@@ -1093,7 +1097,7 @@ async function handleRequest(req,res,url) {
         limitLogin(req);
         check(password.length<=128,'Проверьте почту и пароль.',400);
         if(quickLogin) {
-          if(reviewLogin) check(matchesCode(reviewKey,form.get('reviewKey')),'Проверьте код для жюри.',403);
+          if(reviewLogin && !publicDemo) check(matchesCode(reviewKey,form.get('reviewKey')),'Проверьте код для жюри.',403);
           const selected=form.get('account');
           if ([...demoAccounts.values()].includes(selected)) record=account(selected);
           check(record,'Выберите демо-аккаунт.',401);
@@ -1211,7 +1215,7 @@ export function prepareDemo() {
   data.event.minTeamSize=2;
   data.event.teamSize=4;
   data.event.start=now-3*3600_000;
-  data.event.deadline=now+(hostedReview?30*86400_000:90*60_000);
+  data.event.deadline=now+(publicMode?30*86400_000:90*60_000);
   data.poll=true;
   const demoTask = (name, description, owner, minutes, status) => ({
     id:randomUUID(), name, description, owner, due:now+minutes*60_000, status
@@ -1257,14 +1261,16 @@ export function prepareDemo() {
   second.owner=organizer;
   Object.assign(second.event,{title:'Городские данные',description:'Хакатон по цифровым сервисам для горожан.',rules:'Соберите команду и сдайте ссылку на прототип.',caseText:'Помогите жителям понять, какие городские услуги доступны рядом с домом.',criteria:'Польза для жителей, доступность, качество прототипа.',minTeamSize:2,published:true});
   data.hackathons['city-data']=second;
-  if(hostedReview) {
-    second.event.deadline=now+30*86400_000;
-    data.reviewRoles=[...demoAccounts];
-  }
+  if(publicMode) second.event.deadline=now+30*86400_000;
+  if(hostedReview) data.reviewRoles=[...demoAccounts];
   persist(data);
 }
 
 export function initializeHostedReview() {
+  if(publicDemo) {
+    if(!demoAccounts.size) prepareDemo();
+    return;
+  }
   if(!hostedReview) return;
   if(!state.accounts.length && !state.event.title && !Object.keys(state.hackathons??{}).length) prepareDemo();
   for(const [label,id] of state.reviewRoles??[]) demoAccounts.set(label,id);
@@ -1275,6 +1281,7 @@ if (calledDirectly) {
   if(process.argv[2]==='create-account') {
     const [, , , role, email='', name=''] = process.argv;
     try {
+      check(!publicDemo,'У тестовых ролей в публичном демо уже есть аккаунты.',400);
       check(['organizer','mentor','expert'].includes(role),'Укажите роль organizer, mentor или expert.',400);
       const next=structuredClone(state);
       createAccount(next,role,name,email,process.env.HACKFLOW_NEW_PASSWORD??'');
