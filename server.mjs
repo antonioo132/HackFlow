@@ -26,11 +26,9 @@ const users = {
   guest: { name: 'Анна Белова', label: 'Участник · без команды' }
 };
 const passwordMin = publicMode ? 12 : 4;
-const organizerCode = process.env.HACKFLOW_ORGANIZER_CODE;
 const reviewKey = process.env.HACKFLOW_REVIEW_KEY;
 const hostedReview = publicMode && !publicDemo && (reviewKey?.length ?? 0)>=16;
 const reviewEnabled = () => (demoMode || publicDemo || hostedReview) && demoAccounts.size>0;
-const canBootstrap = () => !publicMode && organizers().length === 0;
 const sessions = new Map();
 const status = ['К выполнению', 'В работе', 'На проверке', 'Выполнено'];
 const eventTypes = ['Старт', 'Публикация кейса', 'Обучение', 'Вебинар', 'Консультация', 'Промежуточный дедлайн', 'Сдача проекта', 'Финальная защита', 'Результаты'];
@@ -212,15 +210,12 @@ function layout(user, title, content, error = '', nav = '', role = '') {
 }
 function signIn(error, register = false, email = '', name = '', role = 'participant', showLogin = false) {
   const roles = [['participant','Участник'],['organizer','Организатор'],['mentor','Ментор · по приглашению'],['expert','Эксперт · по приглашению']];
-  const available = canBootstrap() || (organizerCode?.length ?? 0) >= 16;
-  const choices = select('Кем регистрируетесь','role',available?roles:roles.filter(([id])=>id!=='organizer'),role);
-  const invite = '<div data-invite-field '+(canBootstrap()?'data-first-organizer':'')+'>'+text('Код приглашения','invite','','maxlength="256" autocomplete="off"')+'</div>';
+  const choices = select('Кем регистрируетесь','role',roles,role);
+  const invite = '<div data-invite-field'+(['mentor','expert'].includes(role)?'':' hidden')+'>'+text('Код приглашения ментора или эксперта','invite','','maxlength="256" autocomplete="off"')+'</div>';
   const fields = (register?choices+text('Имя','name',name,'required maxlength="120" autocomplete="name"')+invite:'') +
     text('Электронная почта','email',email,'type="email" required maxlength="254" autocomplete="email"') +
     text('Пароль','password','','type="password" required maxlength="128" autocomplete="'+(register?'new-password':'current-password')+'"');
-  const organizerHint=canBootstrap()?'Первый организатор на этой локальной установке создаёт аккаунт без кода.':
-    available?'Организатор регистрируется с кодом от администратора площадки.':'Чтобы открыть регистрацию организаторов, администратор должен настроить код приглашения.';
-  const body = (register?'<p class="muted">'+organizerHint+' Менторы и эксперты получают коды от организатора. Пароль от '+passwordMin+' символов.</p>':'') +
+  const body = (register?'<p class="muted">Участники и организаторы регистрируются по почте и паролю. Менторы и эксперты получают коды от организатора. Пароль от '+passwordMin+' символов.</p>':'') +
     action(register?'sign-up':'login', fields, register?'Создать аккаунт':'Войти') +
     (register?'<p>Уже есть аккаунт? <a href="/?login">Войти</a></p>':'<p>Впервые здесь? <a href="/?signup">Зарегистрироваться</a></p>')+
     (reviewEnabled()?'<p><a class="button secondary" href="/review">Попробовать демо</a></p>':'');
@@ -1303,9 +1298,6 @@ async function handleRequest(req,res,url,token,user) {
             const invitation=allHackathons(next).flatMap(([,data])=>data.invitations??[]).find(item=>item.code===(form.get('invite')??'').trim() && item.email===email && item.role===role && !item.used && !item.revoked && item.expires>Date.now());
             check(invitation,'Проверьте код, почту и роль. Приглашение должно быть действующим.',403);
             invitation.used=true;
-          }
-          if(role==='organizer' && !canBootstrap()) {
-            check(matchesCode(organizerCode,form.get('invite')),'Чтобы зарегистрироваться организатором, нужен код приглашения.',403);
           }
           record=createAccount(next,role,name,email,password);
           persist(next);

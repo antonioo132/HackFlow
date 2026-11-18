@@ -42,8 +42,7 @@ const registrationRole=document.querySelector('form[action="/sign-up"] select[na
 if(registrationRole){
   const invitation=document.querySelector('[data-invite-field]');
   const update=()=>{
-    invitation.hidden=registrationRole.value==='participant' ||
-      (registrationRole.value==='organizer' && invitation.hasAttribute('data-first-organizer'));
+    invitation.hidden=!['mentor','expert'].includes(registrationRole.value);
   };
   registrationRole.addEventListener('change',update);update();
 }
