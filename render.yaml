@@ -13,8 +13,8 @@ services:
         value: review
       - key: HACKFLOW_DATA_DIR
         value: /var/data
-      - key: HACKFLOW_REVIEW_KEY
-        generateValue: true
+      - key: HACKFLOW_PUBLIC_DEMO
+        value: "1"
       - key: HACKFLOW_ORGANIZER_CODE
         generateValue: true
     disk:

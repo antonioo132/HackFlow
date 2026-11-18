@@ -10,12 +10,11 @@ const calledDirectly = Boolean(process.argv[1] && fileURLToPath(import.meta.url)
 const demoMode = process.argv[2] === '--demo' || (calledDirectly && !publicMode && !process.argv[2]);
 if (demoMode && publicMode) throw new Error('Деморежим доступен только на localhost.');
 const publicDemo = publicMode && process.env.HACKFLOW_PUBLIC_DEMO === '1';
-const memoryOnly = demoMode || publicDemo;
 const demoAccounts = new Map();
 const storage = process.env.HACKFLOW_DATA_DIR
   ? resolve(process.env.HACKFLOW_DATA_DIR)
   : fileURLToPath(new URL('./data/', import.meta.url));
-if (!memoryOnly) mkdirSync(storage, { recursive: true });
+mkdirSync(storage, { recursive: true });
 const db = join(storage,'mvp.json');
 const css = readFileSync(new URL('./style.css', import.meta.url));
 const boardScript = readFileSync(new URL('./board.js', import.meta.url));
@@ -30,7 +29,7 @@ const passwordMin = publicMode ? 12 : 4;
 const organizerCode = process.env.HACKFLOW_ORGANIZER_CODE;
 const reviewKey = process.env.HACKFLOW_REVIEW_KEY;
 const hostedReview = publicMode && !publicDemo && (reviewKey?.length ?? 0)>=16;
-const reviewEnabled = () => (publicDemo || hostedReview) && demoAccounts.size>0;
+const reviewEnabled = () => (demoMode || publicDemo || hostedReview) && demoAccounts.size>0;
 const canBootstrap = () => !publicMode && organizers().length === 0;
 const sessions = new Map();
 const status = ['К выполнению', 'В работе', 'На проверке', 'Выполнено'];
@@ -50,36 +49,41 @@ function emptyHackathon() {
 function seed() {
   return { ...emptyHackathon(), accounts: [], hackathons: {} };
 }
-let state;
+const eventContext = new AsyncLocalStorage();
+const liveWorkspace = { state: seed() };
+const demoWorkspace = { state: seed() };
+const currentWorkspace = () => eventContext.getStore()?.workspace ?? liveWorkspace;
+const state = () => currentWorkspace().state;
+
 function persist(next) {
-  if (!memoryOnly) {
+  const target = currentWorkspace();
+  if (target === liveWorkspace) {
     writeFileSync(db + '.tmp', JSON.stringify(next));
     renameSync(db + '.tmp', db);
   }
-  state = next;
+  target.state = next;
 }
-if (memoryOnly) state=seed();
-else {
-  try { state = JSON.parse(readFileSync(db, 'utf8')); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; persist(seed()); }
+try {
+  liveWorkspace.state = JSON.parse(readFileSync(db, 'utf8'));
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
 }
 
-const eventContext = new AsyncLocalStorage();
 const primaryHack = 'primary';
-const selectedHack = () => eventContext.getStore() ?? primaryHack;
-const currentEventData = () => selectedHack() === primaryHack ? state : state.hackathons[selectedHack()];
+const selectedHack = () => eventContext.getStore()?.hack ?? primaryHack;
+const currentEventData = () => selectedHack() === primaryHack ? state() : state().hackathons[selectedHack()];
 const allHackathons = data => [[primaryHack,data], ...Object.entries(data.hackathons ?? {})];
-const ownerOf = data => data.owner ?? (data === state ? state.accounts.find(person=>person.role==='organizer')?.id : undefined);
+const ownerOf = data => data.owner ?? (data === state() ? data.accounts.find(person=>person.role==='organizer')?.id : undefined);
 const canManage = user => Boolean(user && hasRole(user,'organizer') && ownerOf(currentEventData()) === user);
 function accessStatus(data,id) {
   if(data.applications?.some(application=>application.status==='pending' && application.members.includes(id))) return 'requested';
   if(data.access?.[id]) return data.access[id];
-  if(data!==state || !id) return undefined;
+  if(data!==state() || !id) return undefined;
   const legacyAdmission = account(id)?.admitted;
   if(legacyAdmission===true) return 'admitted';
   if(memberTeam(data,id)) return legacyAdmission===false?'revoked':'admitted';
 }
-const platformTeam = user => (state.platformTeams??[]).find(team=>team.members.includes(user));
+const platformTeam = user => (state().platformTeams??[]).find(team=>team.members.includes(user));
 const pendingApplications = data => (data.applications??[]).filter(item=>item.status==='pending');
 const teamApplication = (data,user) => (data.applications??[]).findLast(item=>item.members.includes(user));
 const participationLabels = {
@@ -101,7 +105,10 @@ function participationStatus(data,user) {
 }
 function saveHackathon(next) {
   if (selectedHack() === primaryHack) persist(next);
-  else persist({ ...state, hackathons:{ ...state.hackathons, [selectedHack()]:next } });
+  else {
+    const current = state();
+    persist({ ...current, hackathons:{ ...current.hackathons, [selectedHack()]:next } });
+  }
 }
 function scopedUrl(location) {
   if(selectedHack()===primaryHack) return location;
@@ -119,10 +126,10 @@ function scopeLinks(markup) {
 }
 
 const memberTeam = (data, user) => data.teams.find(team => team.members.includes(user));
-const account = (id) => (state.accounts ?? []).find(item=>item.id===id);
+const account = (id) => (state().accounts ?? []).find(item=>item.id===id);
 const display = (id) => account(id)?.name ?? users[id]?.name ?? '';
 const hasRole = (id, role) => account(id)?.role === role;
-const withRole = role => (state.accounts ?? []).filter(item=>item.role===role);
+const withRole = role => (state().accounts ?? []).filter(item=>item.role===role);
 const e = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const dt = (value) => new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Yekaterinburg' }).format(value) + ' ЕКБ';
 const inputTime = (value) => value ? new Date(value + 5 * 3600_000).toISOString().slice(0, 16) : '';
@@ -199,8 +206,9 @@ function layout(user, title, content, error = '', nav = '', role = '') {
   const event = currentEventData().event;
   const organizer = hasRole(user,'organizer');
   const scope = nav && event.title && !organizer ? '<p class="sidebar-event">'+e(event.title)+'</p>' : '';
+  const demoLabel = currentWorkspace()===demoWorkspace ? '<a class="hackathon-switch" href="/review">Демо для жюри · сменить роль</a>' : '';
   const teamLink = isParticipant(user)?'<a class="hackathon-switch" href="/my-team">Моя команда на площадке</a>':'';
-  return documentStart+scopeLinks('<body class="app-shell"><aside class="sidebar">'+brand('/hackathons')+'<a class="hackathon-switch" href="/hackathons">'+(organizer?'Мои хакатоны':'Все хакатоны')+'</a>'+teamLink+scope+nav+profile+themeControl+'<small class="sidebar-credit">Code Invaders</small></aside><div class="app-workspace"><header class="workspace-header"><h1>'+e(title)+'</h1></header><main>'+warning+content+'</main></div></body></html>');
+  return documentStart+scopeLinks('<body class="app-shell"><aside class="sidebar">'+brand('/hackathons')+demoLabel+'<a class="hackathon-switch" href="/hackathons">'+(organizer?'Мои хакатоны':'Все хакатоны')+'</a>'+teamLink+scope+nav+profile+themeControl+'<small class="sidebar-credit">Code Invaders</small></aside><div class="app-workspace"><header class="workspace-header"><h1>'+e(title)+'</h1></header><main>'+warning+content+'</main></div></body></html>');
 }
 function signIn(error, register = false, email = '', name = '', role = 'participant', showLogin = false) {
   const roles = [['participant','Участник'],['organizer','Организатор'],['mentor','Ментор · по приглашению'],['expert','Эксперт · по приглашению']];
@@ -215,10 +223,14 @@ function signIn(error, register = false, email = '', name = '', role = 'particip
   const body = (register?'<p class="muted">'+organizerHint+' Менторы и эксперты получают коды от организатора. Пароль от '+passwordMin+' символов.</p>':'') +
     action(register?'sign-up':'login', fields, register?'Создать аккаунт':'Войти') +
     (register?'<p>Уже есть аккаунт? <a href="/?login">Войти</a></p>':'<p>Впервые здесь? <a href="/?signup">Зарегистрироваться</a></p>')+
-    (reviewEnabled()?'<p><a href="/review">Демо для жюри</a></p>':'');
+    (reviewEnabled()?'<p><a class="button secondary" href="/review">Попробовать демо</a></p>':'');
   if(demoMode && !register && !showLogin) {
     const descriptions={organizer:'Публикуйте хакатон, допускайте участников и следите за прогрессом.',mentor:'Помогайте назначенным командам и отвечайте на вопросы капитанов.',expert:'Изучайте сданные решения и оставляйте заключения по критериям.'};
-    const cards=[...demoAccounts].map(([label,id])=>panel(label,'<p class="muted">'+(descriptions[account(id).role]??(memberTeam(currentEventData(),id)?'Работайте с задачами, общайтесь и готовьте проект к сдаче.':'Создайте команду или присоединитесь по коду приглашения.'))+'</p><small class="demo-name">'+e(display(id))+'</small>'+action('demo-login',hidden('account',id),'Открыть'))).join('');
+    const cards=[...demoAccounts].map(([label,id])=>{
+      const person=demoWorkspace.state.accounts.find(item=>item.id===id);
+      const description=descriptions[person.role]??(memberTeam(demoWorkspace.state,id)?'Работайте с задачами, общайтесь и готовьте проект к сдаче.':'Создайте команду или присоединитесь по коду приглашения.');
+      return panel(label,'<p class="muted">'+description+'</p><small class="demo-name">'+e(person.name)+'</small>'+action('demo-login',hidden('account',id),'Открыть'));
+    }).join('');
     return layout(null,'Демо HackFlow','<p class="intro">Выберите роль. Изменения сохраняются до перезапуска демо.</p><div class="form-actions"><a class="button secondary" href="/?signup">Создать аккаунт</a><a href="/?login">Войти с почтой</a></div><div class="cards">'+cards+'</div>',error);
   }
   return layout(null,register?'Создайте аккаунт':'С возвращением','<div class="auth-layout"><aside class="auth-story"><p class="eyebrow">ВАШЕ РАБОЧЕЕ ПРОСТРАНСТВО</p><h2>От первой идеи<br>до финальной защиты.</h2><p>Команда, задачи и поддержка специалистов — в одном месте.</p><ul><li>Понятный следующий шаг</li><li>Общение внутри команды</li><li>Результат, который готов к защите</li></ul></aside><div class="auth panel">'+body+'</div></div>',error);
@@ -226,10 +238,11 @@ function signIn(error, register = false, email = '', name = '', role = 'particip
 function reviewPage(error='') {
   const roles=[...demoAccounts].map(([label,id])=>[id,label]);
   const fields=select('Роль','account',roles)+
-    (publicDemo?'':text('Код для жюри','reviewKey','','type="password" required maxlength="160" autocomplete="off"'));
+    (hostedReview?text('Код для жюри','reviewKey','','type="password" required maxlength="160" autocomplete="off"'):'');
   return layout(null,'Демо для жюри',panel('Выберите роль',
-    '<p>Тестовые роли работают с общими демонстрационными данными.</p>'+
-    action('review',fields,'Войти в демо')+(publicDemo?'':'<p><a href="/?login">Обычный вход</a></p>')),error);
+    '<p>Тестовые роли работают с демонстрационными данными. Изменения сбрасываются при перезапуске.</p>'+
+    action('demo-login',fields,'Войти в демо')+
+    '<div class="form-actions"><a href="/?login">Войти с почтой</a><a href="/?signup">Зарегистрироваться</a></div>'),error);
 }
 function matchesCode(expected,provided) {
   const a=Buffer.from(expected??'');
@@ -385,7 +398,7 @@ function organizerNavigation(page,user) {
     ['schedule','Расписание'],['materials','Материалы'],['staff','Менторы и эксперты'],['analytics','Аналитика']
   ];
   const activePage=page==='content'?'schedule':page??'';
-  const options=allHackathons(state).filter(([,data])=>ownerOf(data)===user).map(([id,data])=>[id,data.event.title||'Новый хакатон']);
+  const options=allHackathons(state()).filter(([,data])=>ownerOf(data)===user).map(([id,data])=>[id,data.event.title||'Новый хакатон']);
   const picker='<form class="hackathon-picker" action="/" method="get">'+
     select('Текущий хакатон','hack',options,selectedHack())+hidden('edit',activePage)+button('Перейти')+'</form>';
   return picker+'<nav aria-label="Разделы организатора" class="tabs">'+sections.map(([id,label])=>
@@ -535,7 +548,7 @@ function organizer(query) {
 function hackathonCatalog(user,error='',mine=false) {
   const organizer = hasRole(user,'organizer');
   const advisor = isAdvisor(user);
-  const visible = allHackathons(state).filter(([id,data]) => {
+  const visible = allHackathons(state()).filter(([id,data]) => {
     if (organizer) return ownerOf(data)===user;
     if (advisor) return data.teams.some(team=>!team.archived && assigned(team,user));
     return data.event.published && (!mine || !['open','closed'].includes(participationStatus(data,user)));
@@ -627,7 +640,6 @@ function applicationPage(user,data,error) {
 
 function screen(user, query, error) {
   if (!user) {
-    if(publicDemo) return reviewPage(error);
     if(query.has('login')) return signIn(error,false,'','','participant',true);
     if(demoMode && !query.has('signup')) return signIn(error);
     if (error || query.has('login') || query.has('signup') || query.has('team')) return signIn(error,query.has('signup'));
@@ -747,7 +759,7 @@ function createAccount(data,role,name,email,password) {
   return record;
 }
 function authenticate(email,password) {
-  const record=(state.accounts??[]).find(item=>item.email===email);
+  const record=(state().accounts??[]).find(item=>item.email===email);
   const hash=scryptSync(password,record?.salt??'unused-account-placeholder',64);
   return record && timingSafeEqual(hash,Buffer.from(record.hash,'hex')) ? record : null;
 }
@@ -758,7 +770,7 @@ function removeMember(team, member) {
 }
 const platformRoutes = new Set(['platform-create-team','platform-join-team','platform-leave','platform-kick']);
 function changePlatformTeam(user,path,form) {
-  const next=structuredClone(state);
+  const next=structuredClone(state());
   const teams=next.platformTeams??=[];
   const team=teams.find(item=>item.members.includes(user));
   if(path==='platform-create-team' || path==='platform-join-team') {
@@ -886,7 +898,7 @@ function organizerAction(data,path,form,upload) {
       const email=field(form,'email',254).toLowerCase();
       check(['mentor','expert'].includes(role),'Выберите роль.',400);
       check(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email),'Укажите корректную почту.',400);
-      check(!state.accounts.some(item=>item.email===email),'Этот аккаунт уже существует.',409);
+      check(!state().accounts.some(item=>item.email===email),'Этот аккаунт уже существует.',409);
       data.invitations??=[];
       data.invitations.push({id:randomUUID(),code:randomBytes(18).toString('hex'),email,role,expires:Date.now()+7*86400000});
       return '/?edit=staff';
@@ -1156,17 +1168,23 @@ function limitLogin(req) {
 export function handle(req,res) {
   const url=URL.parse(req.url,'http://localhost');
   if(!url) return res.writeHead(400).end();
-  const requested = url.searchParams.get('hack') ?? primaryHack;
-  if(requested!==primaryHack && !Object.hasOwn(state.hackathons??{},requested)) {
-    return res.writeHead(404,{'Content-Type':'text/plain; charset=utf-8'}).end('Хакатон не найден.');
-  }
-  return eventContext.run(requested,()=>handleRequest(req,res,url));
-}
-
-async function handleRequest(req,res,url) {
   const token=(req.headers.cookie??'').match(demoMode?/(?:^|;\s*)hackflow_demo=([\w-]+)/:/(?:^|;\s*)hackflow=([\w-]+)/)?.[1];
   for(const [key,session] of sessions) if(session.until<=Date.now()) sessions.delete(key);
-  const user=sessions.get(token)?.user;
+  const session=sessions.get(token);
+  const regularLogin=['/login','/sign-up'].includes(url.pathname) ||
+    (url.pathname==='/' && req.method==='GET' && (url.searchParams.has('login') || url.searchParams.has('signup')));
+  const demoEntry=url.pathname==='/demo-login' ||
+    (url.pathname==='/review' && (req.method==='GET' || !session));
+  const selectedWorkspace=regularLogin ? liveWorkspace : demoEntry ? demoWorkspace : session?.workspace ?? liveWorkspace;
+  const hack=url.searchParams.get('hack') ?? primaryHack;
+  if(hack!==primaryHack && !Object.hasOwn(selectedWorkspace.state.hackathons??{},hack)) {
+    return res.writeHead(404,{'Content-Type':'text/plain; charset=utf-8'}).end('Хакатон не найден.');
+  }
+  const user=session?.workspace===selectedWorkspace ? session.user : undefined;
+  return eventContext.run({hack,workspace:selectedWorkspace},()=>handleRequest(req,res,url,token,user));
+}
+
+async function handleRequest(req,res,url,token,user) {
   const cookieName=demoMode?'hackflow_demo':'hackflow';
   const cookieFlags='; Path=/; HttpOnly; SameSite=Strict'+(publicMode?'; Secure':'');
   res.setHeader('Cache-Control','no-store');
@@ -1219,15 +1237,15 @@ async function handleRequest(req,res,url) {
     const body=checkpointUpdate(team,user,url.searchParams.get('full')==='1');
     return res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(scopeLinks(body));
   }
-  if(url.pathname==='/review') {
+  if(url.pathname==='/review' && req.method==='GET') {
     if(!reviewEnabled()) return page(404,'Демо для жюри недоступно.');
-    if(req.method==='GET') return res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(reviewPage());
+    return res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(reviewPage());
   }
-  if((demoMode || reviewEnabled()) && req.method==='GET' && url.pathname==='/demo-guide') {
+  if(currentWorkspace()===demoWorkspace && req.method==='GET' && url.pathname==='/demo-guide') {
     if(!(admitted(user)||hasRole(user,'organizer')||isAdvisor(user))) return redirect('/?login');
     return res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(layout(user,'Подготовка защиты',panel('Проверка перед сдачей','<ol><li>Пройдите сценарий продукта с чистого аккаунта.</li><li>Проверьте ссылки и доступ к репозиторию.</li><li>Покажите, как результат появляется у организатора.</li></ol><p><a href="/">Вернуться в HackFlow</a></p>')));
   }
-  if((demoMode || reviewEnabled()) && req.method==='GET' && url.pathname==='/demo-project') {
+  if(currentWorkspace()===demoWorkspace && req.method==='GET' && url.pathname==='/demo-project') {
     const team = currentEventData().teams.find(item => item.submission?.link === '/demo-project');
     if(!canView(team,user)) return page(403,'Доступ к этому проекту закрыт.');
     const body = panel('Задача проекта','<p>Участники студенческих мероприятий часто узнают об изменениях из разных чатов. «Пульс» собирает расписание и обновления в одной ленте.</p>')+
@@ -1247,6 +1265,7 @@ async function handleRequest(req,res,url) {
   }
   if(url.pathname!=='/' && req.method!=='POST') return page(404,'Страница не найдена.');
   if(req.method==='GET') {
+    if(user && (url.searchParams.has('login') || url.searchParams.has('signup'))) return redirect('/hackathons');
     if(url.searchParams.has('hack') && hasRole(user,'organizer') && !canManage(user)) return page(403,'Доступ к этому хакатону закрыт.');
     const id=url.searchParams.get('team');
     if(id&&!canView(currentEventData().teams.find(t=>t.id===id),user)) return page(403,'Доступ к этой команде закрыт.');
@@ -1260,9 +1279,8 @@ async function handleRequest(req,res,url) {
     const form=await readForm(req,path==='upload-case-file');
     if(caseActions.has(path) && typeof form.get('caseId')==='string') url.searchParams.set('case',form.get('caseId'));
     if(path==='meeting' && form.get('team')) url.searchParams.set('meeting',form.get('team'));
-    const reviewLogin=path==='review' && reviewEnabled();
-    const quickLogin=reviewLogin || (demoMode && path==='demo-login');
-    if(publicDemo && (path==='login' || path==='sign-up')) return redirect('/review');
+    const quickLogin=currentWorkspace()===demoWorkspace && reviewEnabled() &&
+      (path==='demo-login' || (path==='review' && form.has('account')));
     if(path==='login' || path==='sign-up' || quickLogin) {
       const signingUp=path==='sign-up';
       const email=(form.get('email')??'').trim().toLowerCase().slice(0,255);
@@ -1274,12 +1292,12 @@ async function handleRequest(req,res,url) {
         limitLogin(req);
         check(password.length<=128,'Проверьте почту и пароль.',400);
         if(quickLogin) {
-          if(reviewLogin && !publicDemo) check(matchesCode(reviewKey,form.get('reviewKey')),'Проверьте код для жюри.',403);
+          if(hostedReview) check(matchesCode(reviewKey,form.get('reviewKey')),'Проверьте код для жюри.',403);
           const selected=form.get('account');
           if ([...demoAccounts.values()].includes(selected)) record=account(selected);
           check(record,'Выберите демо-аккаунт.',401);
         } else if(signingUp) {
-          const next=structuredClone(state);
+          const next=structuredClone(state());
           check(['participant','organizer','mentor','expert'].includes(role),'Выберите роль.',400);
           if(['mentor','expert'].includes(role)) {
             const invitation=allHackathons(next).flatMap(([,data])=>data.invitations??[]).find(item=>item.code===(form.get('invite')??'').trim() && item.email===email && item.role===role && !item.used && !item.revoked && item.expires>Date.now());
@@ -1297,18 +1315,18 @@ async function handleRequest(req,res,url) {
         }
       } catch(error) {
         if(!(error instanceof RequestError)) throw error;
-        return res.writeHead(error.code,{'Content-Type':'text/html; charset=utf-8'}).end(reviewLogin
+        return res.writeHead(error.code,{'Content-Type':'text/html; charset=utf-8'}).end(quickLogin
           ? reviewPage(error.message)
           : signIn(error.message,signingUp,email,name,role,path==='login'));
       }
       if(record.role==='participant') {
-        const next=structuredClone(state);
+        const next=structuredClone(state());
         next.accounts.find(item=>item.id===record.id).lastActivity=Date.now();
         persist(next);
       }
       sessions.delete(token);
       const session=randomUUID();
-      sessions.set(session,{user:record.id,until:Date.now()+8*3600_000});
+      sessions.set(session,{user:record.id,workspace:currentWorkspace(),until:Date.now()+8*3600_000});
       res.setHeader('Set-Cookie',cookieName+'='+session+'; Max-Age=28800'+cookieFlags);
       if(record.role==='participant' && (signingUp ||
         (quickLogin && !platformTeam(record.id) && !memberTeam(currentEventData(),record.id)))) return redirect('/my-team');
@@ -1317,17 +1335,18 @@ async function handleRequest(req,res,url) {
     if(path==='logout') {
       sessions.delete(token);
       res.setHeader('Set-Cookie',cookieName+'=; Max-Age=0'+cookieFlags);
-      return redirect('/');
+      return redirect(currentWorkspace()===demoWorkspace ? '/review' : '/');
     }
     check(user,'Войдите в HackFlow.',401);
     if(path==='new-hackathon') {
       check(hasRole(user,'organizer'));
-      if(!state.event.title && !state.owner && ownerOf(state)===user) {
-        persist({...state,owner:user});
+      const current=state();
+      if(!current.event.title && !current.owner && ownerOf(current)===user) {
+        persist({...current,owner:user});
         return redirect('/?edit=event');
       }
       const id = randomUUID();
-      persist({...state,hackathons:{...state.hackathons,[id]:{...emptyHackathon(),owner:user}}});
+      persist({...current,hackathons:{...current.hackathons,[id]:{...emptyHackathon(),owner:user}}});
       return redirect('/?edit=event&hack='+id);
     }
     if(platformRoutes.has(path)) {
@@ -1369,6 +1388,7 @@ async function handleRequest(req,res,url) {
   }
 }
 export function prepareDemo() {
+  demoAccounts.clear();
   const now=Date.now();
   const data=seed();
   const create = (label, role, name) => {
@@ -1440,28 +1460,19 @@ export function prepareDemo() {
   Object.assign(second.event,{title:'Городские данные',description:'Хакатон по цифровым сервисам для горожан.',rules:'Соберите команду и сдайте ссылку на прототип.',caseText:'Помогите жителям понять, какие городские услуги доступны рядом с домом.',criteria:'Польза для жителей, доступность, качество прототипа.',minTeamSize:2,published:true});
   data.hackathons['city-data']=second;
   if(publicMode) second.event.deadline=now+30*86400_000;
-  if(hostedReview) data.reviewRoles=[...demoAccounts];
-  persist(data);
+  demoWorkspace.state=data;
 }
 
 export function initializeHostedReview() {
-  if(publicDemo) {
-    if(!demoAccounts.size) prepareDemo();
-    return;
-  }
-  if(!hostedReview) return;
-  if(!state.accounts.length && !state.event.title && !Object.keys(state.hackathons??{}).length) prepareDemo();
-  for(const [label,id] of state.reviewRoles??[]) demoAccounts.set(label,id);
+  if((demoMode || publicDemo || hostedReview) && !demoAccounts.size) prepareDemo();
 }
 
 if (calledDirectly) {
-  if (demoMode) prepareDemo();
   if(process.argv[2]==='create-account') {
     const [, , , role, email='', name=''] = process.argv;
     try {
-      check(!publicDemo,'У тестовых ролей в публичном демо уже есть аккаунты.',400);
       check(['organizer','mentor','expert'].includes(role),'Укажите роль organizer, mentor или expert.',400);
-      const next=structuredClone(state);
+      const next=structuredClone(state());
       createAccount(next,role,name,email,process.env.HACKFLOW_NEW_PASSWORD??'');
       persist(next);
       console.log('Аккаунт создан: '+email);
